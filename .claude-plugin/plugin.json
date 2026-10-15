@@ -1,0 +1,10 @@
+{
+  "name": "clawd-bros",
+  "version": "0.1.0",
+  "description": "Clawdたちがプロンプト上の帯(終点ステージ)で大乱闘。ツール呼び出しで技が出て、ダメージ%はステータスラインに表示",
+  "author": { "name": "jnk0vc" },
+  "homepage": "https://github.com/jnk0vc/clawd-bros",
+  "repository": "https://github.com/jnk0vc/clawd-bros",
+  "keywords": ["mod", "game", "statusline"],
+  "types": "./types/index.d.ts"
+}

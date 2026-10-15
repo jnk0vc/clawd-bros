@@ -1,0 +1,12 @@
+{
+  "name": "jnk0vc",
+  "owner": { "name": "jnk0vc" },
+  "metadata": { "description": "jnk0vcのClaude Code mod" },
+  "plugins": [
+    {
+      "name": "clawd-bros",
+      "source": "./",
+      "description": "Clawdたちがプロンプト上の帯(終点ステージ)で大乱闘。ツール呼び出しで技が出て、ダメージ%はステータスラインに表示"
+    }
+  ]
+}
