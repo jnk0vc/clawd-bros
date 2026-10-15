@@ -1,5 +1,7 @@
 # Clawd Bros
 
+![Clawd Bros 紹介動画(30秒)](docs/intro.gif)
+
 Claude Codeのプロンプト上の帯を「終点」ステージにして、Clawd 4体が大乱闘するmodです。Claudeがツールを呼ぶたびに対応するClawdが技を出し、各Clawdのダメージ%と残機は帯の最下段のHUDに出ます。P1はキーボードで自分で操作することもできます。
 
 ![場外KOのフレア](docs/ko.svg)
