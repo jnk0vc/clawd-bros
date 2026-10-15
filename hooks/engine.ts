@@ -2,8 +2,30 @@
 // 座標系・型・色はmodel.tsを参照。worldは破壊的に更新する。
 // Date.now / consoleは使わず、乱数はmodel.tsのrand(world)だけを使う(決定的)。
 
-import { FIGHTER_SPECS, PALETTE, SPRITE_H, SPRITE_W, STOCKS, layout, rand, spriteTopRow } from './model'
-import type { ActiveMove, Effect, Family, Fighter, FighterId, Layout, MoveKind, Pose, World } from './model'
+import {
+  FIGHTER_SPECS,
+  PALETTE,
+  PILOT_IDLE_TICKS,
+  SPRITE_H,
+  SPRITE_W,
+  STOCKS,
+  layout,
+  rand,
+  spriteTopRow,
+} from './model'
+import type {
+  ActiveMove,
+  Effect,
+  Family,
+  Fighter,
+  FighterId,
+  Layout,
+  MoveKind,
+  Pilot,
+  PilotCommand,
+  Pose,
+  World,
+} from './model'
 
 // ---- 物理・進行の定数 ----
 
@@ -41,6 +63,12 @@ const GRAB_REACH = 14
 const FINAL_TICKS = 18
 const MAX_EFFECTS = 96
 const MAX_PROJECTILES = 24
+
+/** 手動操作: 1回の押下を押しっぱなし扱いにするティック数(キーリピートの最初の間を埋める) */
+const PILOT_HOLD_TICKS = 4
+/** 手動操作: 同じ向きにこのティック数動き続けたら走りになる */
+const PILOT_RUN_AFTER = 3
+const FAST_FALL_V = 1.0
 
 const DIZZY_YELLOW = 0xffe14a
 const ERR_RED = 0xff5a3c
@@ -329,6 +357,19 @@ function makeFighters(world: World): Fighter[] {
   })
 }
 
+function newPilot(): Pilot {
+  return {
+    lastInputTick: -1,
+    left: 0,
+    right: 0,
+    down: 0,
+    heldTicks: 0,
+    jump: false,
+    attack: false,
+    special: false,
+  }
+}
+
 function beginReady(world: World): void {
   world.phase = 'ready'
   world.phaseTicks = 0
@@ -354,6 +395,7 @@ export function createWorld(width: number, height: number, seed: number): World 
     matchNo: 1,
     seed: Number.isFinite(seed) ? seed | 0 : 1,
     ticker: '',
+    pilot: newPilot(),
   }
   world.fighters = makeFighters(world)
   beginReady(world)
@@ -510,7 +552,8 @@ function koFighter(world: World, v: Fighter, exit: 'left' | 'right' | 'top' | 'b
 function respawn(world: World, L: Layout, f: Fighter): void {
   const fa = fauxOf(world, f)
   f.x = (L.stageLeft + L.stageRight) / 2 - SPRITE_W / 2
-  f.y = Math.min(RESPAWN_Y, L.blastTop - 1)
+  // 低い帯でも復活台の上で全身が見える高さ(スプライト最上段が0行目以上)にする
+  f.y = Math.max(0, Math.min(RESPAWN_Y, L.blastTop - 1, L.platformRow - SPRITE_H))
   f.vx = 0
   f.vy = 0
   f.damage = 0
@@ -1137,9 +1180,18 @@ function aiIdle(world: World, L: Layout, f: Fighter, fa: FighterAux, aggr: numbe
   }
   const sep = separation(world, f)
   if (sep !== 0) {
+    const base = desired
     desired = clamp(desired + sep, -RUN, RUN)
-    // 押し合いでごく遅くなったら、足踏みせず止まる
-    if (Math.abs(desired) < 0.3) desired = 0
+    if (Math.abs(desired) < 0.3) {
+      if (base !== 0) {
+        // 狙いへ向かう途中で間の相手に押し戻されたら、止まらずにすり抜ける(ときどき飛び越える)
+        desired = base
+        if (isGrounded(f, L) && rand(world) < 0.15) groundJump(f, L)
+      } else {
+        // もともと止まっていて重なっているなら、押される向きへ歩いて離れる
+        desired = Math.abs(sep) > 0.05 ? Math.sign(sep) * 0.3 : 0
+      }
+    }
   }
 
   // 足場の端3列以内では中央へ向きを変える
@@ -1203,9 +1255,123 @@ function aiIdle(world: World, L: Layout, f: Fighter, fa: FighterAux, aggr: numbe
   }
 }
 
+// ---- P1の手動操作 ----
+
+export function isPiloted(world: World): boolean {
+  const p = world.pilot
+
+  return p.lastInputTick >= 0 && world.tick - p.lastInputTick < PILOT_IDLE_TICKS
+}
+
+/** コントローラー行からの入力を1つ受け取る。実際に動くのは次の step */
+export function pilotInput(world: World, cmd: PilotCommand): void {
+  const p = world.pilot
+  const p1 = world.fighters[0]
+  // CPUから手動に切り替わった瞬間、ツール呼び出しで積まれていた技は捨てる
+  if (!isPiloted(world) && p1 !== undefined) p1.queue = []
+  p.lastInputTick = world.tick
+  switch (cmd) {
+    case 'left':
+      p.left = PILOT_HOLD_TICKS
+      p.right = 0
+      break
+    case 'right':
+      p.right = PILOT_HOLD_TICKS
+      p.left = 0
+      break
+    case 'down':
+      p.down = PILOT_HOLD_TICKS
+      break
+    case 'jump':
+      p.jump = true
+      break
+    case 'attack':
+      p.attack = true
+      break
+    case 'special':
+      p.special = true
+      break
+  }
+}
+
+/** 手動の技は走り寄らず、その場で向いている方向に出す */
+function startManualMove(world: World, f: Fighter, kind: MoveKind): void {
+  f.move = { kind, tick: 0, targetId: null, hitIds: [], tool: '' }
+  fauxOf(world, f).ms = {
+    approaching: false,
+    approachTicks: 0,
+    pose: 'windup',
+    phase: 0,
+    recover: 0,
+    victimId: null,
+    fx: null,
+  }
+}
+
+function pilotControl(world: World, L: Layout, f: Fighter, fa: FighterAux): void {
+  const p = world.pilot
+  const wantJump = p.jump
+  const wantAttack = p.attack
+  const wantSpecial = p.special
+  p.jump = false
+  p.attack = false
+  p.special = false
+  const dir = p.right > 0 ? 1 : p.left > 0 ? -1 : 0
+  p.heldTicks = dir === 0 ? 0 : p.heldTicks + 1
+  if (p.left > 0) p.left -= 1
+  if (p.right > 0) p.right -= 1
+  const isDown = p.down > 0
+  if (p.down > 0) p.down -= 1
+
+  if (f.move !== null) {
+    updateMove(world, L, f, fa)
+
+    return
+  }
+
+  const grounded = isGrounded(f, L)
+  const speed = p.heldTicks > PILOT_RUN_AFTER ? RUN : WALK
+  // CPUと違って足場の端で止めない(自分から落ちることもできる)
+  if (grounded) f.vx = dir * speed
+  else f.vx += clamp(dir * speed - f.vx, -0.15, 0.15)
+  if (dir !== 0) f.facing = dir
+
+  if (wantJump) {
+    if (grounded) {
+      groundJump(f, L)
+    } else if (f.jumpsLeft > 0) {
+      f.jumpsLeft -= 1
+      f.vy = capV(L, JUMP_V, f.y)
+      sparkAt(world, f)
+    } else if (!fa.upBUsed) {
+      // 空中ジャンプを使い切っていたら上必殺で復帰
+      fa.upBUsed = true
+      f.vy = capV(L, UPB_V, f.y)
+      sparkAt(world, f)
+    }
+  }
+  if (isDown && !grounded && f.vy > -FAST_FALL_V) f.vy = -FAST_FALL_V
+
+  if (wantSpecial) {
+    if (f.hasSmashBall) {
+      f.hasSmashBall = false
+      startManualMove(world, f, 'final')
+    } else {
+      startManualMove(world, f, SIGNATURE_MOVES[f.family])
+    }
+  } else if (wantAttack) {
+    startManualMove(world, f, 'jab')
+  }
+}
+
 function control(world: World, L: Layout, f: Fighter, fa: FighterAux, aggr: number): void {
   if (f.stunTicks > 0) return
   if (f.pose === 'respawn' && f.poseTicks < 2) return
+  if (f.id === 0 && isPiloted(world)) {
+    pilotControl(world, L, f, fa)
+
+    return
+  }
   const off = isOffStage(f, L)
   if (off) {
     if (f.move !== null && f.move.kind !== 'final') cancelMove(world, f)
@@ -1393,9 +1559,22 @@ function shortTool(tool: string): string {
 export function onToolCall(world: World, tool: string): void {
   world.activity = Math.min(1, world.activity + 0.15)
   world.recentCalls.push(world.tick)
+  pruneCalls(world)
   maybeSpawnBall(world)
   const f = fighterByFamily(world, familyOf(tool))
   if (f === undefined || f.stocks <= 0 || f.pose === 'out') return
+
+  // 手動操作中のP1は勝手に技を出さない(スマッシュボールの取得だけは受け付ける)
+  if (f.id === 0 && isPiloted(world)) {
+    world.ticker = `P1 ${f.label} ▸ ${shortTool(tool)}`
+    if (world.smashBall !== null && !f.hasSmashBall && world.tick - world.lastSmashBallTick >= BALL_PICKUP_DELAY) {
+      f.hasSmashBall = true
+      world.smashBall = null
+      popup(world, f, 'SMASH BALL! >', f.color)
+    }
+
+    return
+  }
 
   let kind: MoveKind
   if (f.hasSmashBall) {
@@ -1603,8 +1782,9 @@ export function hudText(world: World): string {
     if (world.phase === 'ready') parts.push('READY?')
     else if (world.phase === 'go') parts.push('GO!')
   }
+  const piloted = isPiloted(world)
   for (const f of world.fighters) {
-    const head = `P${f.id + 1} ${f.label}`
+    const head = `P${f.id + 1} ${f.label}${f.id === 0 && piloted ? '(YOU)' : ''}`
     parts.push(f.stocks <= 0 ? `${head} OUT` : `${head} ${Math.floor(f.damage)}% ${'●'.repeat(f.stocks)}`)
   }
   if (world.ticker !== '') parts.push(`▸ ${world.ticker}`)

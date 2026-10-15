@@ -1,7 +1,8 @@
 // Clawd Brosの描画。Worldを読むだけで、書き換えない。
 // 使う文字は印字可能ASCIIと、ブロック要素 ▀▄█▌▐▖▗▘▙▚▛▜▝▞▟ のみ。
 
-import { DEFAULT_COLOR, PALETTE, SPRITE_H, SPRITE_W, layout, spriteTopRow } from './model'
+import { isPiloted } from './engine'
+import { DEFAULT_COLOR, HUD_ROWS, PALETTE, SPRITE_H, SPRITE_W, layout, spriteTopRow } from './model'
 import type { Effect, Fighter, Grid, Layout, MoveKind, World } from './model'
 
 // ---- 文字コード ----
@@ -423,6 +424,16 @@ function drawFighter(g: Grid, world: World, f: Fighter, dx: number, dizzyFx: boo
   let col0 = Math.round(f.x) + dx
   const top = spriteTopRow(world, f.y)
 
+  // 画面の上へ全身が出たら、最上段に '^' と番号で居場所だけ示す
+  if (top + SPRITE_H - 1 < 0) {
+    const cx = col0 + 4
+    put(g, cx - 1, 0, 0x5e, f.color) // ^
+    put(g, cx, 0, 0x50, f.color) // P
+    put(g, cx + 1, 0, 0x31 + f.id, f.color) // 1..4
+
+    return
+  }
+
   // respawnと無敵中は1ティックおきに点滅。復活台は消さない
   if (pose === 'respawn') {
     for (let k = 1; k <= 7; k++) put(g, col0 + k, top + SPRITE_H, UPPER, WHITE)
@@ -458,6 +469,12 @@ function drawLabel(g: Grid, world: World, f: Fighter, dx: number): void {
   const row = spriteTopRow(world, f.y) - 1
   if (row < 0 || row >= g.rows) return
   const col = Math.round(f.x) + dx + 3
+  if (f.id === 0 && isPiloted(world)) {
+    // 手動操作中のP1は反転表示の 'YOU' で目立たせる
+    for (const [i, ch] of [0x59, 0x4f, 0x55].entries()) putBg(g, col - 1 + i, row, ch, PALETTE.bannerBg, f.color)
+
+    return
+  }
   put(g, col, row, 0x50, f.color) // P
   put(g, col + 1, row, 0x31 + f.id, f.color) // 1..4
 }
@@ -688,9 +705,91 @@ function drawEffect(g: Grid, world: World, e: Effect, dx: number): void {
   }
 }
 
+// ---- HUD(ステージ下の%と残機) ----
+
+const HUD_BG = 0x100c2a
+const HUD_DIM = 0x6c6a9c
+/** スマブラのように、%が上がるほど白→黄→橙→赤→暗赤へ */
+const DAMAGE_STOPS: readonly (readonly [number, number])[] = [
+  [0, 0xffffff],
+  [50, 0xffe14a],
+  [100, 0xff9a3c],
+  [150, 0xff4a3c],
+  [200, 0xb81d1d],
+]
+const STOCK_ICON = [0x259f, 0x2599] // ▟▙: 小さなClawdの頭
+
+function damageColor(damage: number): number {
+  const d = Math.max(0, damage)
+  for (let k = 1; k < DAMAGE_STOPS.length; k++) {
+    const hi = DAMAGE_STOPS[k]
+    const lo = DAMAGE_STOPS[k - 1]
+    if (hi === undefined || lo === undefined) break
+    if (d <= hi[0]) return mix(lo[1], hi[1], (d - lo[0]) / (hi[0] - lo[0]))
+  }
+
+  return DAMAGE_STOPS[DAMAGE_STOPS.length - 1]?.[1] ?? WHITE
+}
+
+/** row 行目に4人分のパネルを等幅で並べる。幅が足りなければ名前・残機アイコンから省く */
+function drawHud(g: Grid, world: World, row: number): void {
+  for (let c = 0; c < g.columns; c++) putBg(g, c, row, SPACE, HUD_DIM, HUD_BG)
+  const count = world.fighters.length
+  if (count === 0) return
+  const panel = Math.floor(g.columns / count)
+  const piloted = isPiloted(world)
+  for (const f of world.fighters) {
+    const x0 = f.id * panel + 1
+    const limit = f.id * panel + panel - 1
+    let x = x0
+    const text = (s: string, fg: number, bg: number = HUD_BG) => {
+      for (let k = 0; k < s.length && x < limit; k++) putBg(g, x++, row, printable(s.charCodeAt(k)), fg, bg)
+    }
+    if (f.id === 0 && piloted) text(' YOU ', PALETTE.bannerBg, f.color)
+    else text(panel >= 22 ? `P${f.id + 1} ${f.label}` : `P${f.id + 1}`, f.color)
+    x += 1
+    if (f.stocks <= 0) {
+      text('OUT', HUD_DIM)
+      continue
+    }
+    text(`${Math.floor(f.damage)}%`, damageColor(f.damage))
+    x += 1
+    if (panel >= 18) {
+      // アイコン同士は1列空けて並べる(続けると1つの塊に見える)
+      for (let s = 0; s < f.stocks && x + 1 < limit; s++) {
+        for (const ch of STOCK_ICON) putBg(g, x++, row, ch, f.color, HUD_BG)
+        x += 1
+      }
+    } else {
+      text(`x${f.stocks}`, f.color)
+    }
+  }
+}
+
 // ---- 公開API: フレーム生成 ----
 
+/** ステージ(world.height 行)の下に HUD_ROWS 行のHUDを付けたフレーム */
 export function drawFrame(world: World): Grid {
+  const stage = drawStage(world)
+  const columns = stage.columns
+  const rows = stage.rows + HUD_ROWS
+  const n = columns * rows
+  const g: Grid = {
+    columns,
+    rows,
+    ch: new Uint32Array(n).fill(SPACE),
+    fg: new Uint32Array(n),
+    bg: new Uint32Array(n),
+  }
+  g.ch.set(stage.ch)
+  g.fg.set(stage.fg)
+  g.bg.set(stage.bg)
+  drawHud(g, world, stage.rows)
+
+  return g
+}
+
+function drawStage(world: World): Grid {
   const columns = Math.max(1, Math.floor(world.width) || 1)
   const rows = Math.max(1, Math.floor(world.height) || 1)
   const n = columns * rows

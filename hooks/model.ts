@@ -10,7 +10,10 @@ export const TICK_MS = 100
 export const SPRITE_W = 9
 export const SPRITE_H = 3
 
-/** 帯の高さ。これ未満ならステージを描かない */
+/** ステージの下に足すHUD(各Clawdの%と残機)の行数。drawFrame の Grid はステージ + この行数 */
+export const HUD_ROWS = 1
+
+/** ステージの高さ(HUDを除く)。これ未満ならステージを描かない */
 export const MIN_ROWS = 7
 export const MAX_ROWS = 10
 export const MIN_COLUMNS = 40
@@ -131,6 +134,28 @@ export type Effect = {
 
 export type MatchPhase = 'ready' | 'go' | 'fight' | 'game'
 
+/** コントローラー行から届くP1の操作。WASD / < > (と矢印・, .)を register 側でこれに直す */
+export type PilotCommand = 'left' | 'right' | 'jump' | 'down' | 'attack' | 'special'
+
+/** この間入力が無ければP1はCPUに戻る */
+export const PILOT_IDLE_TICKS = 100
+
+/** P1の手動操作の状態。端末はキーを離したことを伝えないので、押下ごとに数ティック押しっぱなし扱いにする */
+export type Pilot = {
+  /** 最後に入力があった tick。-1 なら一度も操作していない */
+  lastInputTick: number
+  /** 左右・下を押しっぱなし扱いにする残りティック */
+  left: number
+  right: number
+  down: number
+  /** 同じ向きに動き続けているティック数(歩き→走りの切り替え用) */
+  heldTicks: number
+  /** 次の操作可能ティックで1回だけ出す入力 */
+  jump: boolean
+  attack: boolean
+  special: boolean
+}
+
 export type World = {
   tick: number
   width: number
@@ -154,6 +179,8 @@ export type World = {
   seed: number
   /** ステータスライン末尾に出す直近の出来事。'P3 BASH ▸ Bash: DASH' 等 */
   ticker: string
+  /** P1の手動操作 */
+  pilot: Pilot
 }
 
 export type Layout = {
