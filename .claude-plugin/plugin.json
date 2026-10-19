@@ -5,6 +5,7 @@
   "author": { "name": "jnk0vc" },
   "homepage": "https://github.com/jnk0vc/clawd-bros",
   "repository": "https://github.com/jnk0vc/clawd-bros",
+  "license": "MIT",
   "keywords": ["mod", "game", "statusline"],
   "types": "./types/index.d.ts"
 }

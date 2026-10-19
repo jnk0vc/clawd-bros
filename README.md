@@ -106,3 +106,7 @@ claude plugin test .
 ```
 
 `tsconfig.json`が継承する`.claude-plugin/types/`は、Claude Codeがこのフォルダからmodを読み込んだときに生成します。型チェックはその後に`tsc -p .`で行えます。
+
+## ライセンス
+
+[MIT](LICENSE)
